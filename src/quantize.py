@@ -14,18 +14,37 @@ try:
 except ImportError:
     pass
 try:
-    config_path = "gemlite_config.json"
     from gemlite.helper import A8W8_INT8_dynamic
     import gemlite
-
-    if os.path.exists(config_path):
-        gemlite.load_config(config_path)
-    else: 
-        gemlite.set_autotune("max")
-        gemlite.helper.warmup(shapes=[(128,2048), (2048,2048), (2048,8192), (4096,2048), (8192,2048)], batch_sizes=[1], processor=A8W8_INT8_dynamic())
-        gemlite.cache_config(config_path)
 except ImportError:
     A8W8_INT8_dynamic = None
+    gemlite = None
+
+
+# Gemlite's int8 autotune warmup is a GPU workload (~minutes on first run).
+# Previously this executed at module import, penalising every consumer of
+# world_engine — including pipelines that never use the intw8a8 quant tier.
+# Gate the warmup behind the first INT8W8A8GemLite instantiation so it only
+# runs when actually needed.
+_gemlite_initialized = False
+
+
+def _ensure_gemlite_initialized() -> None:
+    global _gemlite_initialized
+    if _gemlite_initialized or A8W8_INT8_dynamic is None:
+        return
+    config_path = "gemlite_config.json"
+    if os.path.exists(config_path):
+        gemlite.load_config(config_path)
+    else:
+        gemlite.set_autotune("max")
+        gemlite.helper.warmup(
+            shapes=[(128, 2048), (2048, 2048), (2048, 8192), (4096, 2048), (8192, 2048)],
+            batch_sizes=[1],
+            processor=A8W8_INT8_dynamic(),
+        )
+        gemlite.cache_config(config_path)
+    _gemlite_initialized = True
 
 
 @torch.library.custom_op("world_engine::fp4_linear", mutates_args=())
@@ -256,7 +275,8 @@ class INT8W8A8GemLite(nn.Module):
         super().__init__()
         if A8W8_INT8_dynamic is None:
             raise ImportError("Install gemlite for quant='w8a8_gemlite'")
-        
+        _ensure_gemlite_initialized()
+
         self.in_features = lin.in_features
         self.out_features = lin.out_features
 
